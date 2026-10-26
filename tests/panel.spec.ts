@@ -1,37 +1,258 @@
-import {test,expect} from '@playwright/test';
-test('touch panel loads local brand assets and fits landscape screen',async({page})=>{
- const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto('/');await expect(page.getByRole('heading',{name:'Ready for the operation.'})).toBeVisible();
- for(const img of await page.locator('img').all()) expect(await img.evaluate((el:HTMLImageElement)=>el.complete&&el.naturalWidth>0)).toBe(true);
- const buttons=await page.locator('button:visible').evaluateAll(elements=>elements.map(el=>({label:el.textContent,height:el.getBoundingClientRect().height})));
- for(const b of buttons) expect(b.height,`${b.label} touch height`).toBeGreaterThanOrEqual(48);
- expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
- expect(await page.evaluate(()=>document.documentElement.scrollHeight)).toBeLessThanOrEqual(800);
- expect(errors).toEqual([]);
+import { test, expect } from "@playwright/test";
+
+const pages = [
+  "Home",
+  "Comfort",
+  "Start/Stop",
+  "Ventilation",
+  "Fire & Gas",
+  "HVAC",
+  "UPS/POWER",
+  "COMMISSION",
+];
+const nav = (page: import("@playwright/test").Page, name: string) =>
+  page.getByRole("navigation").getByRole("button", { name, exact: true });
+
+test("all panel views fit 1280×800 and controls have touch targets", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await expect(page.locator("html")).toHaveClass("dark");
+  await expect(page.getByText("OPERATOR PANEL", { exact: true })).toHaveCount(
+    0,
+  );
+  for (const brand of ["Halliburton"]) {
+    const logo = page.getByRole("img", { name: brand, exact: true });
+    await expect(logo).toBeVisible();
+    expect(
+      await logo.evaluate(
+        (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
+      ),
+    ).toBe(true);
+  }
+  await expect(page.getByRole("navigation").getByRole("button")).toHaveText(
+    pages,
+  );
+  await expect(
+    page.getByRole("img", { name: "Halliburton", exact: true }),
+  ).toHaveCSS("filter", "none");
+  const menuBounds = await page.getByRole("navigation").boundingBox();
+  const contentBounds = await page.getByRole("main").boundingBox();
+  expect(menuBounds!.x + menuBounds!.width).toBeLessThanOrEqual(
+    contentBounds!.x,
+  );
+  for (const name of pages) {
+    await nav(page, name).tap();
+    await expect(
+      page.getByRole("heading", { name, exact: true, level: 1 }),
+    ).toBeVisible();
+    await expect(nav(page, name)).toHaveAttribute("aria-current", "page");
+    const layout = await page.evaluate(() => ({
+      width: document.documentElement.scrollWidth,
+      height: document.documentElement.scrollHeight,
+    }));
+    expect(layout.width, name).toBeLessThanOrEqual(1280);
+    expect(layout.height, name).toBeLessThanOrEqual(800);
+    const controls = await page
+      .locator("button:visible")
+      .evaluateAll((elements) =>
+        elements.map((el) => ({
+          label: el.getAttribute("aria-label") || el.textContent,
+          width: el.getBoundingClientRect().width,
+          height: el.getBoundingClientRect().height,
+        })),
+      );
+    for (const control of controls) {
+      expect(
+        control.height,
+        `${name}: ${control.label}`,
+      ).toBeGreaterThanOrEqual(48);
+      expect(control.width, `${name}: ${control.label}`).toBeGreaterThanOrEqual(
+        48,
+      );
+    }
+  }
+  expect(errors).toEqual([]);
 });
-test('start and stop require confirmation, cancellation preserves state',async({page})=>{
- await page.goto('/');await page.getByRole('button',{name:'Start / Stop',exact:true}).click();
- await page.getByRole('button',{name:'Stop unit',exact:true}).click();await page.getByRole('button',{name:'Cancel',exact:true}).click();
- await expect(page.getByRole('heading',{name:'Unit is running'})).toBeVisible();
- await page.getByRole('button',{name:'Stop unit',exact:true}).click();await page.getByRole('button',{name:'Confirm stop'}).click();
- await expect(page.getByRole('heading',{name:'Unit is stopped'})).toBeVisible();
- await page.getByRole('button',{name:'Start unit',exact:true}).click();await page.getByRole('button',{name:'Confirm start'}).click();
- await expect(page.getByRole('heading',{name:'Unit is running'})).toBeVisible();
+
+test("unit commands require confirmation and stopped systems reflect unit state", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1024, height: 600 });
+  await page.goto("/");
+  await nav(page, "Start/Stop").tap();
+  await page.getByRole("button", { name: "Stop unit", exact: true }).tap();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await dialog.evaluate(async (element) => {
+    await Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished),
+    );
+  });
+  for (const button of await dialog.getByRole("button").all()) {
+    const bounds = await button.boundingBox();
+    expect(bounds!.height).toBeGreaterThanOrEqual(72);
+    await expect(button).toBeInViewport({ ratio: 1 });
+  }
+  await dialog.getByRole("button", { name: "Cancel" }).tap();
+  await expect(page.getByText("Unit running", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Stop unit", exact: true }).tap();
+  await dialog.getByRole("button", { name: "Stop unit", exact: true }).tap();
+  await expect(page.getByText("Unit stopped", { exact: true })).toBeVisible();
+  await nav(page, "Ventilation").tap();
+  await expect(
+    page.getByRole("switch", { name: "Ventilation" }),
+  ).toBeDisabled();
+  await nav(page, "HVAC").tap();
+  await expect(
+    page.getByRole("switch", { name: "HVAC enabled", exact: true }),
+  ).toBeDisabled();
+  await nav(page, "Start/Stop").tap();
+  await page.getByRole("button", { name: "Start unit", exact: true }).tap();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("Unit stopped", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Start unit", exact: true }).tap();
+  await dialog.getByRole("button", { name: "Start unit", exact: true }).tap();
+  await expect(page.getByText("Unit running", { exact: true })).toBeVisible();
 });
-test('temperature, modes, fan speed and acknowledgement update across views',async({page})=>{
- await page.goto('/');await page.getByRole('button',{name:'Comfort',exact:true}).click();
- for(let i=0;i<10;i++) {const b=page.getByRole('button',{name:'Øk temperatur'});if(await b.isEnabled())await b.click();}
- await expect(page.getByRole('button',{name:'Øk temperatur'})).toBeDisabled();
- await page.getByRole('button',{name:'Manual',exact:true}).click();
- await page.getByRole('button',{name:'Ventilation',exact:true}).click();await page.getByRole('button',{name:'Øk viftehastighet'}).click();
- await page.getByRole('button',{name:'Home',exact:true}).click();await expect(page.getByText('70',{exact:false}).first()).toBeVisible();
- await expect(page.getByText('Manual mode',{exact:true})).toBeVisible();await expect(page.getByText('Target temperature 28 °C')).toBeVisible();
- await page.getByRole('button',{name:'Acknowledge'}).click();await expect(page.getByText('Notice acknowledged',{exact:true})).toBeVisible();
+
+test("climate limits, fan enablement, acknowledgement and reset stay consistent", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await nav(page, "Comfort").tap();
+  for (let i = 0; i < 6; i++)
+    await page
+      .getByRole("button", { name: "Increase temperature", exact: true })
+      .tap();
+  await expect(
+    page.getByRole("button", { name: "Increase temperature", exact: true }),
+  ).toBeDisabled();
+  for (let i = 0; i < 12; i++)
+    await page
+      .getByRole("button", { name: "Decrease temperature", exact: true })
+      .tap();
+  await expect(
+    page.getByRole("button", { name: "Decrease temperature", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Increase fan speed" }).tap();
+  await nav(page, "HVAC").tap();
+  await page.getByRole("radio", { name: "Manual", exact: true }).tap();
+  await nav(page, "Ventilation").tap();
+  await page.getByRole("switch", { name: "Ventilation" }).tap();
+  await nav(page, "Home").tap();
+  await expect(
+    page
+      .getByRole("group", { name: "Ventilation reading" })
+      .filter({ hasText: "0%" }),
+  ).toBeVisible();
+  await nav(page, "Ventilation").tap();
+  await page.getByRole("switch", { name: "Ventilation" }).tap();
+  await nav(page, "Home").tap();
+  await expect(
+    page
+      .getByRole("group", { name: "Ventilation reading" })
+      .filter({ hasText: "70%" }),
+  ).toBeVisible();
+  await nav(page, "Ventilation").tap();
+  await page.getByRole("button", { name: "Acknowledge" }).tap();
+  await expect(
+    page.getByRole("button", { name: "Acknowledged", exact: true }),
+  ).toBeDisabled();
+  await nav(page, "Home").tap();
+  await expect(
+    page.getByRole("button", { name: "View filter notice" }),
+  ).toBeHidden();
+  await nav(page, "COMMISSION").tap();
+  await page.getByRole("button", { name: "Reset", exact: true }).tap();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Reset", exact: true })
+    .tap();
+  await expect(
+    page.getByRole("heading", { name: "Home", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Setpoint 22 °C", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("group", { name: "Ventilation reading" })
+      .filter({ hasText: "65%" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "View filter notice" }),
+  ).toBeVisible();
 });
-test('all eight pages render and compact layout avoids horizontal overflow',async({page})=>{
- await page.setViewportSize({width:768,height:1024});await page.goto('/');
- for(const name of ['Comfort','Start / Stop','Ventilation','Fire & Gas','HVAC','UPS / Power','Commission','Home']){
-  await page.getByRole('navigation').getByRole('button',{name,exact:true}).click();
-  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(768);
- }
-});
+
+for (const size of [
+  { width: 768, height: 1024 },
+  { width: 390, height: 844 },
+]) {
+  test(`navigation and content remain accessible at ${size.width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(size);
+    await page.goto("/");
+    for (const name of pages) {
+      await nav(page, name).tap();
+      await expect(
+        page.getByRole("heading", { name, exact: true, level: 1 }),
+      ).toBeVisible();
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+      ).toBeLessThanOrEqual(size.width);
+      const bounds = await page.getByRole("navigation").boundingBox();
+      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(size.height + 1);
+    }
+  });
+}
+
+for (const size of [
+  { width: 1280, height: 720 },
+  { width: 1024, height: 768 },
+  { width: 1024, height: 600 },
+]) {
+  test(`all eight pages fit without scrolling at ${size.width}×${size.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(size);
+    await page.goto("/");
+    for (const name of pages) {
+      await nav(page, name).tap();
+      const bounds = await page.evaluate(() => ({
+        width: document.documentElement.scrollWidth,
+        height: document.documentElement.scrollHeight,
+      }));
+      expect(bounds.width, name).toBeLessThanOrEqual(size.width);
+      expect(bounds.height, name).toBeLessThanOrEqual(size.height);
+      if (size.width === 1024 && size.height === 600) {
+        const targets = await page
+          .locator("button:visible")
+          .evaluateAll((buttons) =>
+            buttons.map((button) => ({
+              label: button.getAttribute("aria-label") || button.textContent,
+              width: button.getBoundingClientRect().width,
+              height: button.getBoundingClientRect().height,
+            })),
+          );
+        for (const target of targets) {
+          expect(
+            target.width,
+            `${name}: ${target.label}`,
+          ).toBeGreaterThanOrEqual(56);
+          expect(
+            target.height,
+            `${name}: ${target.label}`,
+          ).toBeGreaterThanOrEqual(56);
+        }
+      }
+      for (const button of await page.getByRole("button").all())
+        await expect(button).toBeInViewport({ ratio: 1 });
+    }
+  });
+}
